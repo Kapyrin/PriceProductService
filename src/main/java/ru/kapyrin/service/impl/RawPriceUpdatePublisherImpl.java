@@ -41,7 +41,7 @@ public class RawPriceUpdatePublisherImpl implements RawPriceUpdatePublisher {
 
     @Override
     public void publishRawPriceUpdate(String rawJsonBody) {
-        int confirmTimeoutMs = propertiesLoader.getIntProperty("rabbitmq.confirm.timeout.ms", 5000); // Значение по умолчанию 5000 мс
+        int confirmTimeoutMs = propertiesLoader.getIntProperty("rabbitmq.confirm.timeout.ms", 5000);
         try {
             metricsService.recordPostRequest();
             validateRawPriceUpdate(rawJsonBody);
