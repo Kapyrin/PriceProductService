@@ -1,15 +1,24 @@
-<?xml version="1.0" encoding="UTF-8"?>
 <configuration>
 
     <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
         <encoder>
-            <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+            <pattern>%d{YYYY-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
         </encoder>
     </appender>
 
-    <logger name="ru.kapyrin" level="DEBUG"/>
 
-    <root level="INFO"> <appender-ref ref="STDOUT"/>
+    <appender name="ASYNC" class="ch.qos.logback.classic.AsyncAppender">
+
+        <discardingThreshold>0</discardingThreshold>
+
+        <queueSize>512</queueSize>
+        
+
+        <appender-ref ref="STDOUT" />
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="ASYNC" />
     </root>
 
 </configuration>

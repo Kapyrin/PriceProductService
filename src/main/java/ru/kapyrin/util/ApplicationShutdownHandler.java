@@ -10,10 +10,10 @@ import ru.kapyrin.service.RawPriceUpdatePublisher;
 import javax.sql.DataSource;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 @Slf4j
-@RequiredArgsConstructor
 public class ApplicationShutdownHandler {
     private final RawPriceUpdatePublisher rawPriceUpdatePublisher;
     private final List<Thread> consumerThreads;
@@ -23,11 +23,40 @@ public class ApplicationShutdownHandler {
     private final DataSource dataSource;
     private final ExecutorService validationExecutor;
     private final ExecutorService dbExecutor;
-    private final ExecutorService scalingExecutor;
+    private final ScheduledExecutorService scalingExecutor;
+    private final ConsumerInitializer consumerInitializer;
+    private final DlqProcessor dlqProcessorTask;
+
+    public ApplicationShutdownHandler(
+            RawPriceUpdatePublisher rawPriceUpdatePublisher,
+            List<Thread> consumerThreads,
+            ExecutorService dlqProcessor,
+            RabbitMQConfig rabbitMQConfig,
+            RedisConfig redisConfig,
+            DataSource dataSource,
+            ExecutorService validationExecutor,
+            ExecutorService dbExecutor,
+            ScheduledExecutorService scalingExecutor,
+            ConsumerInitializer consumerInitializer,
+            DlqProcessor dlqProcessorTask) {
+        this.rawPriceUpdatePublisher = rawPriceUpdatePublisher;
+        this.consumerThreads = consumerThreads;
+        this.dlqProcessor = dlqProcessor;
+        this.rabbitMQConfig = rabbitMQConfig;
+        this.redisConfig = redisConfig;
+        this.dataSource = dataSource;
+        this.validationExecutor = validationExecutor;
+        this.dbExecutor = dbExecutor;
+        this.scalingExecutor = scalingExecutor;
+        this.consumerInitializer = consumerInitializer;
+        this.dlqProcessorTask = dlqProcessorTask;
+    }
 
     public void shutdown() {
         log.info("Shutting down application...");
         rawPriceUpdatePublisher.shutdown();
+        consumerInitializer.shutdown();
+        dlqProcessorTask.shutdown();
         consumerThreads.forEach(Thread::interrupt);
         dlqProcessor.shutdownNow();
         rabbitMQConfig.close();

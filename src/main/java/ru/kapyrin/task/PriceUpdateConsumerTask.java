@@ -1,15 +1,15 @@
 package ru.kapyrin.task;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.DeliverCallback;
 import io.micrometer.core.instrument.Counter;
-import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.Metrics;
 import io.micrometer.core.instrument.Timer;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import ru.kapyrin.config.PropertiesLoader;
 import ru.kapyrin.config.RabbitMQConfig;
 import ru.kapyrin.exception.PriceUpdateException;
 import ru.kapyrin.model.PriceUpdate;
@@ -17,167 +17,199 @@ import ru.kapyrin.service.PriceCalculationService;
 import ru.kapyrin.service.PriceUpdateValidator;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.Executors;
 
 @Slf4j
 @RequiredArgsConstructor
-public class PriceUpdateConsumerTask implements Runnable {
-    private static final int MAX_RETRIES = 3;
-
+public class PriceUpdateConsumerTask implements Runnable{
     private final RabbitMQConfig rabbitMQConfig;
     private final ExecutorService validationExecutor;
     private final ExecutorService dbExecutor;
     private final PriceCalculationService priceCalculationService;
     private final PriceUpdateValidator validator;
+    private final PropertiesLoader propertiesLoader;
     private final ObjectMapper objectMapper = new ObjectMapper();
-    private final Timer validationTimer;
-    private final Timer dbTimer;
-    private final Counter processedMessages;
-    private final Counter errorMessages;
+    private final Timer validationTimer = Metrics.timer("price_update_validation_time");
+    private final Timer dbTimer = Metrics.timer("price_update_db_time");
+    private final Counter processedMessages = Metrics.counter("rabbitmq_messages_processed");
+    private final Counter errorMessages = Metrics.counter("rabbitmq_messages_errors");
+    private final Counter invalidUpdates = Metrics.counter("rabbitmq_invalid_updates_total");
+    private final Counter updatesSucceeded = Metrics.counter("price_updates_succeeded_total");
+    private final Counter updatesFailed = Metrics.counter("price_updates_failed_total");
+    private final Counter dbRetriesTotal = Metrics.counter("db_retries_total");
+    private final int maxRetries;
+    private final int prefetch;
+    private volatile Channel channel;
+    private volatile String consumerTag;
+    private final ExecutorService ackExecutor = Executors.newSingleThreadExecutor();
+
 
     public PriceUpdateConsumerTask(
             RabbitMQConfig rabbitMQConfig,
             ExecutorService validationExecutor,
             ExecutorService dbExecutor,
             PriceCalculationService priceCalculationService,
-            PriceUpdateValidator validator) {
+            PriceUpdateValidator validator,
+            PropertiesLoader propertiesLoader) {
         this.rabbitMQConfig = rabbitMQConfig;
         this.validationExecutor = validationExecutor;
         this.dbExecutor = dbExecutor;
         this.priceCalculationService = priceCalculationService;
         this.validator = validator;
-        this.validationTimer = Metrics.timer("price_update_validation_time");
-        this.dbTimer = Metrics.timer("price_update_db_time");
-        this.processedMessages = Metrics.counter("rabbitmq_messages_processed");
-        this.errorMessages = Metrics.counter("rabbitmq_messages_errors");
-        Gauge.builder("rabbitmq_queue_size", () -> {
-            try (Channel channel = rabbitMQConfig.getConnection().createChannel()) {
-                return (double) channel.messageCount(rabbitMQConfig.getRawQueueName());
-            } catch (IOException | TimeoutException e) {
-                log.error("Failed to get queue size for {}: {}", rabbitMQConfig.getRawQueueName(), e.getMessage());
-                return 0.0;
-            }
-        }).register(Metrics.globalRegistry);
-        log.info("PriceUpdateConsumerTask initialized for queue '{}'", rabbitMQConfig.getRawQueueName());
+        this.propertiesLoader = propertiesLoader;
+        this.maxRetries = Math.max(1, propertiesLoader.getIntProperty("db.retry.max.attempts", 3));
+        this.prefetch = Math.max(1, propertiesLoader.getIntProperty("rabbitmq.prefetch", 50));
+        log.info("PriceUpdateConsumerTask initialized for queue '{}', prefetch={}, maxRetries={}", rabbitMQConfig.getRawQueueName(), prefetch, maxRetries);
     }
 
     @Override
     public void run() {
-        log.info("PriceUpdateConsumerTask started, waiting for messages...");
+        log.info("PriceUpdateConsumerTask started, prefetch={}, maxRetries={}", prefetch, maxRetries);
+        configureConsumer();
+    }
 
-        DeliverCallback deliverCallback = (consumerTag, delivery) -> {
-            String message = new String(delivery.getBody(), "UTF-8");
-            long deliveryTag = delivery.getEnvelope().getDeliveryTag();
-            log.debug("Received message from RabbitMQ: {}", message);
-
-            validationExecutor.submit(() -> {
-                Timer.Sample sample = Timer.start();
-                try (Channel channel = rabbitMQConfig.getConnection().createChannel()) {
-                    List<PriceUpdate> updates = objectMapper.readValue(message,
-                            objectMapper.getTypeFactory().constructCollectionType(List.class, PriceUpdate.class));
-                    if (updates == null || updates.isEmpty()) {
-                        log.warn("Received empty or null price updates, rejecting to DLQ");
-                        errorMessages.increment();
-                        rejectToDlq(channel, deliveryTag, message);
-                        return;
-                    }
-
-                    updates.forEach(update -> {
-                        try {
-                            validator.validatePriceUpdate(update);
-                            dbExecutor.submit(() -> {
-                                Timer.Sample dbSample = Timer.start();
-                                int retryCount = 0;
-                                while (retryCount < MAX_RETRIES) {
-                                    try {
-                                        priceCalculationService.calculateAndPersistAveragePrice(update);
-                                        dbSample.stop(dbTimer);
-                                        log.debug("DbExecutor: Successfully processed update for product_id={}", update.productId());
-                                        break;
-                                    } catch (PriceUpdateException e) {
-                                        retryCount++;
-                                        if (retryCount == MAX_RETRIES) {
-                                            log.error("Failed to process DB update for product_id={} after {} retries: {}",
-                                                    update.productId(), MAX_RETRIES, e.getMessage());
-                                            errorMessages.increment();
-                                            try (Channel dlqChannel = rabbitMQConfig.getConnection().createChannel()) {
-                                                dlqChannel.basicPublish("", rabbitMQConfig.getDlqName(), null,
-                                                        objectMapper.writeValueAsBytes(update));
-                                                log.debug("Sent PriceUpdate for product_id={} to DLQ", update.productId());
-                                            } catch (IOException | TimeoutException dlqEx) {
-                                                log.error("Failed to send to DLQ for product_id={}: {}",
-                                                        update.productId(), dlqEx.getMessage());
-                                            }
-                                        } else {
-                                            try {
-                                                Thread.sleep(1000 * retryCount);
-                                            } catch (InterruptedException ie) {
-                                                Thread.currentThread().interrupt();
-                                            }
-                                        }
-                                    }
-                                }
-                            });
-                            log.info("Validated price update for product_id={}, manufacturer={}",
-                                    update.productId(), update.manufacturerName());
-                        } catch (PriceUpdateException e) {
-                            log.error("Failed to validate price update for product_id={}: {}",
-                                    update.productId(), e.getMessage());
-                            errorMessages.increment();
-                            try (Channel dlqChannel = rabbitMQConfig.getConnection().createChannel()) {
-                                dlqChannel.basicPublish("", rabbitMQConfig.getDlqName(), null,
-                                        objectMapper.writeValueAsBytes(update));
-                                log.debug("Sent PriceUpdate for product_id={} to DLQ", update.productId());
-                            } catch (IOException | TimeoutException dlqEx) {
-                                log.error("Failed to send to DLQ for product_id={}: {}",
-                                        update.productId(), dlqEx.getMessage());
-                            }
-                        }
-                    });
-                    processedMessages.increment();
-                    channel.basicAck(deliveryTag, false);
-                    sample.stop(validationTimer);
-                } catch (JsonProcessingException e) {
-                    log.error("Failed to deserialize RabbitMQ message to JSON: {}", e.getMessage());
-                    errorMessages.increment();
-                    try (Channel channel = rabbitMQConfig.getConnection().createChannel()) {
-                        rejectToDlq(channel, deliveryTag, message);
-                    } catch (IOException | TimeoutException ex) {
-                        log.error("Failed to create channel for DLQ: {}", ex.getMessage());
-                    }
-                } catch (IOException | TimeoutException e) {
-                    log.error("Failed to process RabbitMQ message: {}", e.getMessage());
-                    errorMessages.increment();
-                    try (Channel channel = rabbitMQConfig.getConnection().createChannel()) {
-                        rejectToDlq(channel, deliveryTag, message);
-                    } catch (IOException | TimeoutException ex) {
-                        log.error("Failed to create channel for DLQ: {}", ex.getMessage());
-                    }
-                }
-            });
-        };
-
-        try (Channel channel = rabbitMQConfig.getConnection().createChannel()) {
-            channel.basicConsume(rabbitMQConfig.getRawQueueName(), false, deliverCallback, consumerTag -> {});
-        } catch (IOException | TimeoutException e) {
+    private void configureConsumer() {
+        try {
+            channel = rabbitMQConfig.getConnection().createChannel();
+            channel.basicQos(prefetch);
+            DeliverCallback deliverCallback = (consumerTag, delivery) -> {
+                this.consumerTag = consumerTag;
+                final long deliveryTag = delivery.getEnvelope().getDeliveryTag();
+                final byte[] body = delivery.getBody();
+                validationExecutor.submit(() -> processMessage(deliveryTag, body));
+            };
+            channel.basicConsume(rabbitMQConfig.getRawQueueName(), false, deliverCallback, tag -> {});
+        } catch (IOException e) {
             log.error("Failed to start RabbitMQ consumer for queue '{}': {}", rabbitMQConfig.getRawQueueName(), e.getMessage());
             throw new RuntimeException("Failed to start RabbitMQ consumer", e);
         }
     }
 
-    private void rejectToDlq(Channel channel, long deliveryTag, String message) {
+    private void processMessage(long deliveryTag, byte[] body) {
+        Timer.Sample sample = Timer.start();
+        try {
+            String jsonBody = new String(body, StandardCharsets.UTF_8);
+            List<PriceUpdate> updates = objectMapper.readValue(jsonBody, new TypeReference<>() {});
+            if (updates == null || updates.isEmpty()) {
+                log.warn("Empty or null price updates, rejecting, deliveryTag={}", deliveryTag);
+                errorMessages.increment();
+                ackExecutor.submit(() -> basicRejectNoRequeue(deliveryTag));
+                return;
+            }
+
+            for (PriceUpdate update : updates) {
+                try {
+                    validator.validatePriceUpdate(update);
+                    processDbWithRetry(update);
+                } catch (PriceUpdateException e) {
+                    log.warn("Validation failed for productId={}: {}", update.productId(), e.getMessage());
+                    invalidUpdates.increment();
+                    submitOnAckExecutor(() -> publishUpdateToDlq(update));
+                } catch (Exception ex) {
+                    log.error("DB processing failed for productId={}: {}", update.productId(), ex.getMessage());
+                    updatesFailed.increment();
+                    submitOnAckExecutor(() -> publishUpdateToDlq(update));
+                }
+            }
+
+            submitOnAckExecutor(() -> {
+                try {
+                    processedMessages.increment();
+                    channel.basicAck(deliveryTag, false);
+                } catch (IOException ioe) {
+                    log.error("Failed to ack message, deliveryTag={}: {}", deliveryTag, ioe.getMessage());
+                }
+            });
+
+        } catch (IOException e) {
+            log.error("Failed to deserialize message, deliveryTag={}: {}", deliveryTag, e.getMessage());
+            errorMessages.increment();
+            ackExecutor.submit(() -> basicRejectNoRequeue(deliveryTag));
+        } finally {
+            sample.stop(validationTimer);
+        }
+    }
+
+    private void processDbWithRetry(PriceUpdate update) {
+        Timer.Sample dbSample = Timer.start();
+        int attempt = 0;
+        long backoffMs = 300L;
+        while (true) {
+            attempt++;
+            try {
+                CompletableFuture.runAsync(() -> priceCalculationService.calculateAndPersistAveragePrice(update), dbExecutor).join();
+                dbSample.stop(dbTimer);
+                updatesSucceeded.increment();
+                return;
+            } catch (Exception e) {
+                if (attempt >= maxRetries) {
+                    log.error("DB failed after {} attempts, product_id={}: {}", attempt, update.productId(), e.getMessage());
+                    updatesFailed.increment();
+                    throw new PriceUpdateException("DB operation failed after max retries", e);
+                }
+                dbRetriesTotal.increment();
+                try {
+                    Thread.sleep(backoffMs);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new PriceUpdateException("Interrupted during backoff", ie);
+                }
+                backoffMs = Math.min(backoffMs * 2, 5_000L);
+            }
+        }
+    }
+
+    private void publishUpdateToDlq(PriceUpdate update) {
+        try {
+            byte[] payload = objectMapper.writeValueAsBytes(update);
+            channel.basicPublish("", rabbitMQConfig.getDlqName(), null, payload);
+        } catch (Exception e) {
+            log.error("Failed to publish item to DLQ, product_id={}: {}", update.productId(), e.getMessage());
+        }
+    }
+
+    private void basicRejectNoRequeue(long deliveryTag) {
         try {
             channel.basicReject(deliveryTag, false);
-            channel.basicPublish("", rabbitMQConfig.getDlqName(), null, message.getBytes("UTF-8"));
-            log.debug("Message rejected and sent to DLQ for deliveryTag={}", deliveryTag);
         } catch (IOException e) {
-            log.error("Failed to reject message to DLQ for deliveryTag={}: {}", deliveryTag, e.getMessage());
+            log.error("Failed to reject message, deliveryTag={}: {}", deliveryTag, e.getMessage());
+        }
+    }
+
+    private void submitOnAckExecutor(Runnable r) {
+        try {
+            ackExecutor.submit(() -> {
+                try {
+                    r.run();
+                } catch (Exception ex) {
+                    log.error("Channel operation failed: {}", ex.getMessage());
+                }
+            });
+        } catch (Exception e) {
+            log.error("Ack executor rejected task: {}", e.getMessage());
         }
     }
 
     public void shutdown() {
         log.info("Shutting down PriceUpdateConsumerTask");
+        try {
+            if (consumerTag != null && channel != null && channel.isOpen()) {
+                channel.basicCancel(consumerTag);
+            }
+        } catch (Exception e) {
+            log.warn("basicCancel failed: {}", e.getMessage());
+        }
+        try {
+            if (channel != null && channel.isOpen()) {
+                channel.close();
+            }
+        } catch (Exception e) {
+            log.warn("Channel close failed: {}", e.getMessage());
+        }
+        ackExecutor.shutdownNow();
     }
 }

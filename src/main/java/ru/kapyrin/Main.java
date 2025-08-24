@@ -15,19 +15,21 @@ import ru.kapyrin.config.impl.FilePropertiesLoader;
 import ru.kapyrin.controller.PriceApiVerticle;
 import ru.kapyrin.repository.PriceRepository;
 import ru.kapyrin.repository.impl.PriceRepositoryImpl;
+import ru.kapyrin.service.MetricsService;
 import ru.kapyrin.service.PriceAverageCalculator;
 import ru.kapyrin.service.PriceCalculationService;
 import ru.kapyrin.service.PriceUpdateValidator;
 import ru.kapyrin.service.RawPriceUpdatePublisher;
+import ru.kapyrin.service.impl.MetricsServiceImpl;
 import ru.kapyrin.service.impl.PriceAverageCalculatorImpl;
 import ru.kapyrin.service.impl.PriceCalculationServiceImpl;
 import ru.kapyrin.service.impl.PriceUpdateValidatorImpl;
 import ru.kapyrin.service.impl.RawPriceUpdatePublisherImpl;
 import ru.kapyrin.util.ApplicationShutdownHandler;
+import ru.kapyrin.util.ConnectionMonitor;
 import ru.kapyrin.util.ConsumerInitializer;
 import ru.kapyrin.util.ConsumerScaler;
 import ru.kapyrin.util.DlqProcessor;
-import ru.kapyrin.util.ConnectionMonitor;
 
 import javax.sql.DataSource;
 import java.util.ArrayList;
@@ -57,10 +59,21 @@ public class Main {
         RedisConfig redisConfig = new RedisConfig(propertiesLoader);
         log.info("RedisConfig initialized");
 
+        ConnectionMonitor connectionMonitor = new ConnectionMonitor(rabbitMQConfig, redisConfig);
+        connectionMonitor.registerMetrics();
+        connectionMonitor.checkRedisConnection();
+
         PriceRepository priceRepository = new PriceRepositoryImpl(dataSource);
         log.info("PriceRepository initialized");
 
-        PriceAverageCalculator priceAverageCalculator = new PriceAverageCalculatorImpl(priceRepository, redisConfig);
+        MetricsService metricsService = new MetricsServiceImpl(meterRegistry);
+        log.info("MetricsService initialized");
+
+        ExecutorService dbExecutorVirtual = Executors.newVirtualThreadPerTaskExecutor();
+        log.info("DB Executor (Virtual Threads) initialized");
+
+        PriceAverageCalculator priceAverageCalculator = new PriceAverageCalculatorImpl(
+                priceRepository, redisConfig, metricsService, dbExecutorVirtual);
         log.info("PriceAverageCalculator initialized");
 
         PriceCalculationService priceCalculationService = new PriceCalculationServiceImpl(priceRepository, priceAverageCalculator);
@@ -69,17 +82,11 @@ public class Main {
         PriceUpdateValidator priceUpdateValidator = new PriceUpdateValidatorImpl();
         log.info("PriceUpdateValidator initialized");
 
-        RawPriceUpdatePublisher rawPriceUpdatePublisher = new RawPriceUpdatePublisherImpl(rabbitMQConfig);
+        RawPriceUpdatePublisher rawPriceUpdatePublisher = new RawPriceUpdatePublisherImpl(rabbitMQConfig, metricsService, propertiesLoader);
         log.info("RawPriceUpdatePublisher initialized");
 
         ExecutorService validationExecutor = Executors.newWorkStealingPool();
         log.info("Validation/Deserialization Executor (WorkStealingPool) initialized");
-
-        ExecutorService dbExecutorVirtual = Executors.newVirtualThreadPerTaskExecutor();
-        log.info("DB Executor (Virtual Threads) initialized");
-
-        ConnectionMonitor connectionMonitor = new ConnectionMonitor(rabbitMQConfig, redisConfig);
-        connectionMonitor.registerMetrics();
 
         List<Thread> consumerThreads = new ArrayList<>();
         ConsumerInitializer consumerInitializer = new ConsumerInitializer(
@@ -94,21 +101,24 @@ public class Main {
                 consumerInitializer.getMaxConsumerCount(),
                 consumerInitializer.getQueueSizeThreshold(),
                 rabbitMQConfig, validationExecutor, dbExecutorVirtual,
-                priceCalculationService, priceUpdateValidator);
-        scalingExecutor.scheduleAtFixedRate(scaler::scale, 0, 60, TimeUnit.SECONDS);
+                priceCalculationService, priceUpdateValidator, propertiesLoader);
+        scalingExecutor.scheduleAtFixedRate(scaler::scale, 0, 30, TimeUnit.SECONDS);
 
-        ExecutorService dlqProcessor = Executors.newSingleThreadExecutor();
-        DlqProcessor dlqProcessorTask = new DlqProcessor(rabbitMQConfig);
+        ExecutorService dlqProcessor = Executors.newVirtualThreadPerTaskExecutor();
+        DlqProcessor dlqProcessorTask = new DlqProcessor(rabbitMQConfig, propertiesLoader);
         dlqProcessor.submit(dlqProcessorTask::process);
 
+        ScheduledExecutorService monitorExecutor = Executors.newSingleThreadScheduledExecutor();
+        monitorExecutor.scheduleAtFixedRate(connectionMonitor::checkRedisConnection, 0, 60, TimeUnit.SECONDS);
+
         Vertx vertx = Vertx.vertx();
-        vertx.deployVerticle(new PriceApiVerticle(rawPriceUpdatePublisher, priceAverageCalculator, propertiesLoader, dbExecutorVirtual, meterRegistry))
+        vertx.deployVerticle(new PriceApiVerticle(rawPriceUpdatePublisher, priceAverageCalculator, propertiesLoader, metricsService, meterRegistry))
                 .onSuccess(id -> log.info("PriceApiVerticle deployed with ID: {}", id))
                 .onFailure(err -> log.error("Failed to deploy PriceApiVerticle: {}", err.getMessage()));
 
         ApplicationShutdownHandler shutdownHandler = new ApplicationShutdownHandler(
                 rawPriceUpdatePublisher, consumerThreads, dlqProcessor, rabbitMQConfig, redisConfig,
-                dataSource, validationExecutor, dbExecutorVirtual, scalingExecutor);
+                dataSource, validationExecutor, dbExecutorVirtual, scalingExecutor, consumerInitializer, dlqProcessorTask);
         Runtime.getRuntime().addShutdownHook(new Thread(shutdownHandler::shutdown));
     }
 }

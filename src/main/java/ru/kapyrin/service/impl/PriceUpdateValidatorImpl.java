@@ -6,8 +6,7 @@ import ru.kapyrin.model.PriceUpdate;
 import ru.kapyrin.service.PriceUpdateValidator;
 import ru.kapyrin.validation.PriceUpdateRuleProvider;
 
-import java.util.List;
-import java.util.stream.Collectors;
+import java.util.Optional;
 
 @Slf4j
 public class PriceUpdateValidatorImpl implements PriceUpdateValidator {
@@ -20,16 +19,16 @@ public class PriceUpdateValidatorImpl implements PriceUpdateValidator {
 
     @Override
     public void validatePriceUpdate(PriceUpdate priceUpdate) throws PriceUpdateException {
-        List<String> errors = ruleProvider.getValidationRules().stream()
+
+        Optional<String> firstError = ruleProvider.getValidationRules().stream()
                 .filter(rule -> rule.predicate().test(priceUpdate))
                 .map(PriceUpdateRuleProvider.ValidationRule::message)
-                .collect(Collectors.toList());
+                .findFirst();
 
-        if (!errors.isEmpty()) {
-            String errorMessage = String.join("; ", errors);
-            log.error("Validation failed for price update {}: {}", priceUpdate, errorMessage);
+        if (firstError.isPresent()) {
+            String errorMessage = firstError.get();
+            log.warn("Validation failed for price update {}: {}", priceUpdate, errorMessage);
             throw new PriceUpdateException(errorMessage);
         }
-        log.debug("Price update for product_id={} passed validation.", priceUpdate.productId());
     }
 }

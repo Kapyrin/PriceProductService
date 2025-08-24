@@ -1,6 +1,8 @@
 package ru.kapyrin.service;
 
+import java.util.concurrent.CompletableFuture;
+
 public interface PriceAverageCalculator {
-    Double getAveragePrice(Long productId);
+    CompletableFuture<Double> getAveragePriceAsync(Long productId);
     void updateAveragePriceCaches(Long productId, Double newAveragePrice);
 }

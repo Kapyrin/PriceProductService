@@ -4,7 +4,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import ru.kapyrin.exception.PriceUpdateException;
 import ru.kapyrin.model.PriceUpdate;
-import ru.kapyrin.model.ProductAggregates;
 import ru.kapyrin.repository.PriceRepository;
 import ru.kapyrin.service.PriceAverageCalculator;
 import ru.kapyrin.service.PriceCalculationService;
@@ -23,30 +22,23 @@ public class PriceCalculationServiceImpl implements PriceCalculationService {
             Double oldPriceForVendor = repository.getOldPriceForVendorProduct(connection, priceUpdate.productId(), priceUpdate.manufacturerName());
             repository.upsertPrice(connection, priceUpdate);
 
-            ProductAggregates currentAggregates = repository.getAggregates(connection, priceUpdate.productId());
-            Double currentTotalSum = currentAggregates.totalSumPrices();
-            Long currentOfferCount = currentAggregates.offerCount();
-
-            Double updatedTotalSum = currentTotalSum;
-            Long updatedOfferCount = currentOfferCount;
+            final double deltaSum;
+            final long deltaCount;
 
             if (oldPriceForVendor != null) {
-                updatedTotalSum = currentTotalSum - oldPriceForVendor + priceUpdate.price();
+                deltaSum = priceUpdate.price() - oldPriceForVendor;
+                deltaCount = 0L;
             } else {
-                updatedTotalSum = currentTotalSum + priceUpdate.price();
-                updatedOfferCount = currentOfferCount + 1;
+                deltaSum = priceUpdate.price();
+                deltaCount = 1L;
             }
 
-            Double calculatedAverage = (updatedOfferCount > 0) ? updatedTotalSum / updatedOfferCount : null;
-            log.debug("Calculated new aggregates for product_id={}: sum={}, count={}, average={}", priceUpdate.productId(), updatedTotalSum, updatedOfferCount, calculatedAverage);
-
-            repository.upsertAggregates(connection, priceUpdate.productId(), calculatedAverage, updatedTotalSum, updatedOfferCount);
-
-            return calculatedAverage;
+            double initialAvg = (deltaCount > 0) ? deltaSum : 0.0;
+            return repository.updateAggregatesAtomically(connection, priceUpdate.productId(), initialAvg, deltaSum, deltaCount);
         });
 
         priceAverageCalculator.updateAveragePriceCaches(priceUpdate.productId(), newCalculatedAverage);
-        log.debug("PriceCalculationService: Updated Redis cache for product_id={} after DB commit.", priceUpdate.productId());
+        log.debug("PriceCalculationService: Updated Redis cache for product_id={} with new average={}", priceUpdate.productId(), newCalculatedAverage);
 
         return newCalculatedAverage;
     }

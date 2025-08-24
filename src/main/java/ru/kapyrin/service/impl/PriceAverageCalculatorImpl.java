@@ -1,82 +1,93 @@
 package ru.kapyrin.service.impl;
 
+import io.micrometer.core.instrument.Timer;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import redis.clients.jedis.Jedis;
-import redis.clients.jedis.JedisPool;
+import redis.clients.jedis.exceptions.JedisConnectionException;
 import ru.kapyrin.config.RedisConfig;
-import ru.kapyrin.exception.PriceUpdateException;
 import ru.kapyrin.repository.PriceRepository;
+import ru.kapyrin.service.MetricsService;
 import ru.kapyrin.service.PriceAverageCalculator;
 
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+
 @Slf4j
+@RequiredArgsConstructor
 public class PriceAverageCalculatorImpl implements PriceAverageCalculator {
-    private final PriceRepository repository;
-    private final JedisPool jedisPool;
+    private final PriceRepository priceRepository;
+    private final RedisConfig redisConfig;
+    private final MetricsService metricsService;
+    private final ExecutorService dbExecutor;
     private final int cacheExpireSeconds;
 
-    public PriceAverageCalculatorImpl(PriceRepository repository, RedisConfig redisConfig) {
-        this.repository = repository;
-        this.jedisPool = redisConfig.getJedisPool();
-        this.cacheExpireSeconds = redisConfig.getCacheExpireMinutes() * 60;
-        log.info("PriceAverageCalculatorImpl initialized with JedisPool. Cache expiration: {} seconds", cacheExpireSeconds);
-        log.info("Ensure Redis is configured with maxmemory={} bytes and maxmemory-policy=allkeys-lru",
-                redisConfig.getMaxCacheSize() * 8);
+    public PriceAverageCalculatorImpl(PriceRepository priceRepository, RedisConfig redisConfig,
+                                      MetricsService metricsService, ExecutorService dbExecutor) {
+        this.priceRepository = priceRepository;
+        this.redisConfig = redisConfig;
+        this.metricsService = metricsService;
+        this.dbExecutor = dbExecutor;
+        this.cacheExpireSeconds = redisConfig.getCacheExpireSeconds();
     }
 
     @Override
-    public Double getAveragePrice(Long productId) {
-        log.debug("PriceAverageCalculator: Attempting to get average price for product_id={}", productId);
-
-        try (Jedis jedis = jedisPool.getResource()) {
-            String cachedPriceStr = jedis.get("avg_price:" + productId);
-            if (cachedPriceStr != null) {
-                double cachedPrice = Double.parseDouble(cachedPriceStr);
-                log.debug("PriceAverageCalculator: Found average price in Redis cache for product_id={}: {}", productId, cachedPrice);
-                return cachedPrice;
-            }
-        } catch (Exception e) {
-            log.error("Error accessing Redis cache for product_id={}: {}", productId, e.getMessage());
+    public CompletableFuture<Double> getAveragePriceAsync(Long productId) {
+        metricsService.recordGetRequest();
+        if (productId == null || productId <= 0) {
+            log.warn("Invalid product ID: {}", productId);
+            metricsService.recordGetError();
+            return CompletableFuture.failedFuture(new IllegalArgumentException("Invalid product ID: " + productId));
         }
-
-        try {
-            Double storedPrice = repository.getStoredAveragePrice(productId);
-            if (storedPrice != null) {
-                log.debug("PriceAverageCalculator: Found stored average price in product_avg_price for product_id={}: {}", productId, storedPrice);
-                updateAveragePriceCaches(productId, storedPrice);
-                return storedPrice;
+        return CompletableFuture.supplyAsync(() -> {
+            Timer.Sample sample = metricsService.startGetTimer();
+            try {
+                if (redisConfig.isRedisAvailable()) {
+                    try (Jedis jedis = redisConfig.getJedisPool().getResource()) {
+                        String cachedPrice = jedis.get("avg_price:" + productId);
+                        if (cachedPrice != null) {
+                            return Double.parseDouble(cachedPrice);
+                        }
+                    } catch (JedisConnectionException e) {
+                        log.error("Redis connection lost for product_id={}: {}", productId, e.getMessage());
+                        redisConfig.setRedisAvailable(false);
+                    } catch (Exception e) {
+                        log.error("Error accessing Redis cache for product_id={}: {}", productId, e.getMessage());
+                    }
+                }
+                Double price = priceRepository.getStoredAveragePrice(productId);
+                if (price != null) {
+                    updateAveragePriceCaches(productId, price);
+                    return price;
+                }
+                throw new IllegalStateException("Product not found or no average price");
+            } catch (Exception e) {
+                log.error("Error getting average price for product_id={}: {}", productId, e.getMessage());
+                metricsService.recordGetError();
+                throw new IllegalStateException("Product not found or no average price", e);
+            } finally {
+                metricsService.stopGetTimer(sample);
             }
-        } catch (PriceUpdateException e) {
-            log.warn("PriceAverageCalculator: Failed to retrieve stored average price for product_id={} from DB: {}", productId, e.getMessage());
-        }
-
-        try {
-            Double calculatedPrice = repository.getAveragePrice(productId);
-            if (calculatedPrice != null) {
-                log.debug("PriceAverageCalculator: Calculated average price from product_price for product_id={}: {}", productId, calculatedPrice);
-                updateAveragePriceCaches(productId, calculatedPrice);
-                return calculatedPrice;
-            } else {
-                log.info("PriceAverageCalculator: No average price found or calculated for product_id={}", productId);
-                updateAveragePriceCaches(productId, null);
-            }
-        } catch (PriceUpdateException e) {
-            log.error("PriceAverageCalculator: Failed to calculate average price from product_price for product_id={} due to DB error: {}", productId, e.getMessage());
-        }
-        return null;
+        }, dbExecutor);
     }
 
     @Override
     public void updateAveragePriceCaches(Long productId, Double newAveragePrice) {
-        try (Jedis jedis = jedisPool.getResource()) {
-            if (newAveragePrice != null) {
-                jedis.setex("avg_price:" + productId, cacheExpireSeconds, String.valueOf(newAveragePrice));
-                log.debug("PriceAverageCalculator: Updated Redis cache for product_id={}: {}", productId, newAveragePrice);
-            } else {
-                jedis.del("avg_price:" + productId);
-                log.debug("PriceAverageCalculator: Invalidated Redis cache for product_id={}", productId);
+        if (redisConfig.isRedisAvailable() && redisConfig.getJedisPool() != null) {
+            try (Jedis jedis = redisConfig.getJedisPool().getResource()) {
+                if (newAveragePrice != null) {
+                    jedis.setex("avg_price:" + productId, cacheExpireSeconds, String.valueOf(newAveragePrice));
+                    log.debug("Updated Redis cache for product_id={}: {}", productId, newAveragePrice);
+                } else {
+                    jedis.del("avg_price:" + productId);
+                    log.debug("Invalidated Redis cache for product_id={}", productId);
+                }
+            } catch (JedisConnectionException e) {
+                log.error("Redis connection lost for product_id={}: {}", productId, e.getMessage());
+                redisConfig.setRedisAvailable(false);
+            } catch (Exception e) {
+                log.error("Error updating/invalidating Redis cache for product_id={}: {}", productId, e.getMessage());
             }
-        } catch (Exception e) {
-            log.error("Error updating/invalidating Redis cache for product_id={}: {}", productId, e.getMessage());
         }
     }
 }

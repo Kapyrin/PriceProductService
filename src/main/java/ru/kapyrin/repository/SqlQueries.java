@@ -50,4 +50,18 @@ public class SqlQueries {
     public static final String SELECT_AGGREGATES_DATA = """
             SELECT product_id, avg_price, total_sum_prices, offer_count FROM product_avg_price WHERE product_id = ?
             """;
+    public static final String ATOMIC_UPDATE_AGGREGATES = """
+            INSERT INTO product_avg_price (product_id, avg_price, total_sum_prices, offer_count)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (product_id)
+            DO UPDATE SET
+                total_sum_prices = product_avg_price.total_sum_prices + EXCLUDED.total_sum_prices,
+                offer_count = product_avg_price.offer_count + EXCLUDED.offer_count,
+                avg_price = CASE
+                                WHEN (product_avg_price.offer_count + EXCLUDED.offer_count) = 0 THEN 0
+                                ELSE (product_avg_price.total_sum_prices + EXCLUDED.total_sum_prices) / (product_avg_price.offer_count + EXCLUDED.offer_count)
+                            END
+            RETURNING avg_price
+            """;
+
 }

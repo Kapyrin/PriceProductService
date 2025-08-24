@@ -1,6 +1,9 @@
 plugins {
     id 'java'
+    id 'scala'
     id 'com.github.johnrengelman.shadow' version '8.1.1'
+    id 'io.gatling.gradle' version '3.10.5'
+    id 'org.flywaydb.flyway' version '11.10.5'
 }
 
 group = 'ru.kapyrin'
@@ -16,20 +19,42 @@ java {
     }
 }
 
+configurations.all {
+    resolutionStrategy {
+        force 'com.fasterxml.jackson.core:jackson-databind:2.19.1'
+        force 'com.fasterxml.jackson.core:jackson-core:2.19.1'
+        force 'com.fasterxml.jackson.core:jackson-annotations:2.19.1'
+        force 'ch.qos.logback:logback-classic:1.5.13'
+        force 'ch.qos.logback:logback-core:1.5.13'
+        force 'org.slf4j:slf4j-api:2.0.15'
+        force 'io.netty:netty-common:4.2.1.Final'
+        force 'io.netty:netty-buffer:4.2.1.Final'
+        force 'io.netty:netty-transport:4.2.1.Final'
+        force 'io.netty:netty-handler:4.2.1.Final'
+        force 'io.netty:netty-codec-http:4.2.1.Final'
+        force 'io.netty:netty-transport-native-epoll:4.2.1.Final'
+    }
+}
+
 dependencies {
     implementation 'io.vertx:vertx-core:5.0.0'
     implementation 'io.vertx:vertx-web:5.0.0'
-    implementation 'com.fasterxml.jackson.core:jackson-databind:2.19.0'
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.19.1'
     implementation 'org.postgresql:postgresql:42.7.4'
-    implementation 'ch.qos.logback:logback-classic:1.5.8'
+    implementation 'ch.qos.logback:logback-classic:1.5.13'
     implementation 'com.zaxxer:HikariCP:6.0.0'
     implementation 'com.rabbitmq:amqp-client:5.22.0'
     implementation 'redis.clients:jedis:5.2.0'
-    implementation 'io.micrometer:micrometer-core:1.13.6'
+    implementation 'io.micrometer:micrometer-core:1.15.0'
     implementation 'io.micrometer:micrometer-registry-prometheus:1.15.0'
+    implementation 'org.flywaydb:flyway-core:11.10.5'
+    implementation 'org.flywaydb:flyway-database-postgresql:11.10.5'
     compileOnly 'org.projectlombok:lombok:1.18.34'
     annotationProcessor 'org.projectlombok:lombok:1.18.34'
-
+    implementation('io.gatling.highcharts:gatling-charts-highcharts:3.10.5') {
+        exclude group: 'ch.qos.logback'
+    }
+    implementation 'org.scala-lang:scala-library:2.13.13'
     testImplementation platform('org.junit:junit-bom:5.11.3')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testImplementation 'org.mockito:mockito-core:5.14.2'
@@ -39,12 +64,28 @@ dependencies {
     testImplementation 'io.vertx:vertx-junit5:5.0.0'
 }
 
+sourceSets {
+    gatling {
+        scala {
+            srcDirs = ['src/test/scala']
+        }
+        resources {
+            srcDirs = ['src/test/resources']
+        }
+    }
+}
+
+tasks.named('jar') {
+    enabled = false
+}
+
 shadowJar {
     archiveBaseName.set('app')
     archiveClassifier.set('')
     manifest {
         attributes 'Main-Class': 'ru.kapyrin.Main'
     }
+    mergeServiceFiles()
 }
 
 tasks.build {
@@ -56,4 +97,9 @@ test {
     testLogging {
         events "passed", "skipped", "failed"
     }
+}
+
+tasks.named('gatlingRun') {
+    systemProperty 'gatling.core.outputDirectoryBaseName', 'gatling-results'
+    jvmArgs '-Xmx2g'
 }
