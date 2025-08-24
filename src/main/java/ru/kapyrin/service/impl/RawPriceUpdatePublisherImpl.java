@@ -1,6 +1,5 @@
 package ru.kapyrin.service.impl;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rabbitmq.client.AMQP;
 import com.rabbitmq.client.Channel;
@@ -10,11 +9,10 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import ru.kapyrin.config.PropertiesLoader;
 import ru.kapyrin.config.RabbitMQConfig;
-import ru.kapyrin.model.PriceUpdate;
 import ru.kapyrin.service.MetricsService;
 import ru.kapyrin.service.RawPriceUpdatePublisher;
+
 import java.io.IOException;
-import java.util.List;
 import java.util.concurrent.TimeoutException;
 
 @Slf4j

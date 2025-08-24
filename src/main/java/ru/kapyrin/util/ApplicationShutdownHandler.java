@@ -1,7 +1,6 @@
 package ru.kapyrin.util;
 
 import com.zaxxer.hikari.HikariDataSource;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import ru.kapyrin.config.RabbitMQConfig;
 import ru.kapyrin.config.RedisConfig;

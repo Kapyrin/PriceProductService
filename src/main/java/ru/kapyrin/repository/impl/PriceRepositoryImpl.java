@@ -4,7 +4,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import ru.kapyrin.exception.PriceUpdateException;
 import ru.kapyrin.model.PriceUpdate;
-import ru.kapyrin.model.ProductAggregates;
 import ru.kapyrin.model.ProductAggregatesData;
 import ru.kapyrin.repository.PriceRepository;
 import ru.kapyrin.repository.SqlQueries;
