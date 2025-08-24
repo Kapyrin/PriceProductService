@@ -22,7 +22,6 @@ public class RawPriceUpdatePublisherImpl implements RawPriceUpdatePublisher {
     private final Channel channel;
     private final String exchangeName;
     private final String rawRoutingKey;
-    private final ObjectMapper objectMapper = new ObjectMapper();
     private final PropertiesLoader propertiesLoader;
 
     public RawPriceUpdatePublisherImpl(RabbitMQConfig rabbitMQConfig, MetricsService metricsService, PropertiesLoader propertiesLoader) {
@@ -69,12 +68,12 @@ public class RawPriceUpdatePublisherImpl implements RawPriceUpdatePublisher {
         }
         try {
             Json.decodeValue(rawJsonBody);
-            if (rawJsonBody.length() > 1000 * 1024) {
-                log.warn("Batch size exceeds limit of 1MB, size={} bytes", rawJsonBody.length());
+            if (rawJsonBody.length() > propertiesLoader.getLongProperty("max.body.size", 3_000_000L)) {
+                log.warn("Batch size exceeds limit of 3MB, size={} bytes", rawJsonBody.length());
                 metricsService.recordPostError();
                 throw new IllegalArgumentException("Batch size exceeds limit of 1MB");
             }
-            metricsService.recordBatchSize((int) Math.ceil(rawJsonBody.length() / 100.0)); // Оценка размера
+            metricsService.recordBatchSize((int) Math.ceil(rawJsonBody.length() / 100.0));
         } catch (DecodeException e) {
             log.warn("Invalid JSON format, size={} bytes: {}", rawJsonBody.length(), e.getMessage());
             metricsService.recordPostError();
