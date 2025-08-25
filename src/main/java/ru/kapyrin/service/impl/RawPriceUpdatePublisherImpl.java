@@ -1,10 +1,10 @@
 package ru.kapyrin.service.impl;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rabbitmq.client.AMQP;
 import com.rabbitmq.client.Channel;
 import io.vertx.core.json.DecodeException;
-import io.vertx.core.json.Json;
+import io.vertx.core.json.JsonArray;
+import io.vertx.core.json.JsonObject;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import ru.kapyrin.config.PropertiesLoader;
@@ -67,13 +67,15 @@ public class RawPriceUpdatePublisherImpl implements RawPriceUpdatePublisher {
             throw new IllegalArgumentException("Request body cannot be empty");
         }
         try {
-            Json.decodeValue(rawJsonBody);
+            int batchCount = computeBatchSize(rawJsonBody);
+//            Json.decodeValue(rawJsonBody);
             if (rawJsonBody.length() > propertiesLoader.getLongProperty("max.body.size", 3_000_000L)) {
-                log.warn("Batch size exceeds limit of 3MB, size={} bytes", rawJsonBody.length());
+                log.warn("Batch size exceeds limit of 3 MB, size={} bytes", rawJsonBody.length());
                 metricsService.recordPostError();
-                throw new IllegalArgumentException("Batch size exceeds limit of 1MB");
+                throw new IllegalArgumentException("Batch size exceeds limit of 3 MB");
             }
-            metricsService.recordBatchSize((int) Math.ceil(rawJsonBody.length() / 100.0));
+            metricsService.recordBatchSize(batchCount);
+
         } catch (DecodeException e) {
             log.warn("Invalid JSON format, size={} bytes: {}", rawJsonBody.length(), e.getMessage());
             metricsService.recordPostError();
@@ -93,4 +95,22 @@ public class RawPriceUpdatePublisherImpl implements RawPriceUpdatePublisher {
         }
         log.info("RawPriceUpdatePublisher shutdown complete");
     }
+
+    private int computeBatchSize(String rawJsonBody) {
+        String s = rawJsonBody.stripLeading();
+        if (s.isEmpty()) {
+            throw new IllegalArgumentException("Request body cannot be empty");
+        }
+        char first = s.charAt(0);
+        if (first == '[') {
+            return new JsonArray(s).size();
+        } else if (first == '{') {
+
+            new JsonObject(s);
+            return 1;
+        } else {
+            throw new IllegalArgumentException("Invalid JSON: expected array or object at top-level");
+        }
+    }
+
 }
