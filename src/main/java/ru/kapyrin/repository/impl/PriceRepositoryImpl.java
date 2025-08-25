@@ -25,20 +25,25 @@ public class PriceRepositoryImpl implements PriceRepository {
     @Override
     public <T> T executeInTransaction(Function<Connection, T> task) throws PriceUpdateException {
         try (Connection connection = dataSource.getConnection()) {
+            boolean oldAutoCommit = connection.getAutoCommit();
             connection.setAutoCommit(false);
-            Savepoint savepoint = connection.setSavepoint();
             try {
                 T result = task.apply(connection);
                 connection.commit();
                 return result;
             } catch (Exception e) {
-                connection.rollback(savepoint);
-                throw new PriceUpdateException("Transaction failed, rolling back", e);
+                connection.rollback();
+                throw new PriceUpdateException("Transaction failed, rolled back", e);
+            } finally {
+                try {
+                    connection.setAutoCommit(oldAutoCommit);
+                } catch (SQLException ignored) {}
             }
         } catch (SQLException e) {
             throw new PriceUpdateException("Failed to get connection for transaction", e);
         }
     }
+
 
     @Override
     public void upsertProduct(Connection connection, Long productId, String productName) throws PriceUpdateException {
