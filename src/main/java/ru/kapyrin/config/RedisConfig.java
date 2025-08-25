@@ -18,17 +18,21 @@ public class RedisConfig {
 
     public RedisConfig(PropertiesLoader propertiesLoader) {
         JedisPoolConfig poolConfig = new JedisPoolConfig();
-        poolConfig.setMaxTotal(128);
-        poolConfig.setMaxIdle(128);
-        poolConfig.setMinIdle(16);
-        poolConfig.setTestOnBorrow(true);
-        poolConfig.setTestOnReturn(true);
-        poolConfig.setTestWhileIdle(true);
-        poolConfig.setMaxWait(Duration.ofSeconds(5));
-        poolConfig.setTimeBetweenEvictionRuns(Duration.ofSeconds(30));
-        this.cacheExpireSeconds = propertiesLoader.getIntProperty("redis.cache.expire.minutes", 10) * 60;
-        this.jedisPool = new JedisPool(poolConfig, propertiesLoader.getProperty("redis.host", "localhost"),
-                propertiesLoader.getIntProperty("redis.port", 6379));
+        poolConfig.setMaxTotal(propertiesLoader.getIntProperty("redis.pool.max.total", 128));
+        poolConfig.setMaxIdle(propertiesLoader.getIntProperty("redis.pool.max.idle", 128));
+        poolConfig.setMinIdle(propertiesLoader.getIntProperty("redis.pool.min.idle", 16));
+        poolConfig.setTestOnBorrow(propertiesLoader.getBooleanProperty("redis.pool.test.on.borrow", true));
+        poolConfig.setTestOnReturn(propertiesLoader.getBooleanProperty("redis.pool.test.on.return", true));
+        poolConfig.setTestWhileIdle(propertiesLoader.getBooleanProperty("redis.pool.test.while.idle", true));
+        poolConfig.setMaxWait(Duration.ofMillis(propertiesLoader.getLongProperty("redis.pool.max.wait.ms", 5000L)));
+        poolConfig.setTimeBetweenEvictionRuns(Duration.ofMillis(propertiesLoader.getLongProperty("redis.pool.eviction.interval.ms", 30000L)));
+        long expireSeconds = Duration.ofMinutes(propertiesLoader.getIntProperty("redis.cache.expire.minutes", 10)).getSeconds();
+        this.cacheExpireSeconds = (int) Math.min(Integer.MAX_VALUE, expireSeconds);
+        this.jedisPool = new JedisPool(
+                poolConfig,
+                propertiesLoader.getProperty("redis.host", "localhost"),
+                propertiesLoader.getIntProperty("redis.port", 6379)
+        );
         this.isRedisAvailable = false;
     }
 

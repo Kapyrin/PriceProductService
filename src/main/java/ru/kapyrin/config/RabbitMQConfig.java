@@ -6,6 +6,7 @@ import com.rabbitmq.client.ConnectionFactory;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import java.io.IOException;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.TimeoutException;
@@ -35,7 +36,10 @@ public class RabbitMQConfig {
             Channel channel = connection.createChannel();
             channel.exchangeDeclare(exchangeName, "topic", true);
             Map<String, Object> args = new HashMap<>();
-            args.put("x-message-ttl", propertiesLoader.getIntProperty("rabbitmq.dlq.ttl.hours", 12) * 3600 * 1000);
+            long ttlMs = Duration.ofHours(
+                    propertiesLoader.getLongProperty("rabbitmq.dlq.ttl.hours", 12L)
+            ).toMillis();
+            args.put("x-message-ttl", ttlMs);
             args.put("x-dead-letter-exchange", exchangeName);
             args.put("x-dead-letter-routing-key", "price.update.dlq");
             channel.queueDeclare(rawQueueName, true, false, false, args);

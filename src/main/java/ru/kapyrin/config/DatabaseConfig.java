@@ -4,6 +4,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import lombok.extern.slf4j.Slf4j;
 import org.flywaydb.core.Flyway;
+import ru.kapyrin.exception.DatabaseInitializeException;
 
 import javax.sql.DataSource;
 
@@ -44,7 +45,7 @@ public class DatabaseConfig {
             log.info("Database schema initialized successfully with Flyway.");
         } catch (Exception e) {
             log.error("Failed to initialize database schema with Flyway: {}", e.getMessage(), e);
-            throw new RuntimeException("Failed to initialize database schema", e);
+            throw new DatabaseInitializeException("Failed to initialize database schema", e);
         }
     }
 }
