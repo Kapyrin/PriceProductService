@@ -36,16 +36,6 @@ public class SqlQueries {
             SELECT price FROM product_price WHERE product_id = ? AND manufacturer_name = ?
             """;
 
-    public static final String SELECT_AGGREGATES_FROM_AVG_PRICE = """
-            SELECT total_sum_prices, offer_count FROM product_avg_price WHERE product_id = ?
-            """;
-
-    public static final String UPSERT_AVG_PRICE_WITH_AGGREGATES = """
-            INSERT INTO product_avg_price (product_id, avg_price, total_sum_prices, offer_count)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT (product_id)
-            DO UPDATE SET avg_price = EXCLUDED.avg_price, total_sum_prices = EXCLUDED.total_sum_prices, offer_count = EXCLUDED.offer_count
-            """;
 
     public static final String SELECT_AGGREGATES_DATA = """
             SELECT product_id, avg_price, total_sum_prices, offer_count FROM product_avg_price WHERE product_id = ?
